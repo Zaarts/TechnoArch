@@ -1,51 +1,97 @@
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { AudioSample, Plugin } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: (process.env.API_KEY as string) });
+
+interface AIRecommendationResponse {
+  text: string;
+  recommendedIds: string[];
+}
 
 export const getAIRecommendation = async (
   query: string,
   relevantSamples: AudioSample[],
   plugins: Plugin[]
-): Promise<string> => {
-  // Формируем текстовый паспорт для контекста
+): Promise<AIRecommendationResponse> => {
   const samplesContext = relevantSamples.map(s => ({
+    id: s.id,
     name: s.name,
     tags: [...s.sourceTags, ...s.acousticTags],
-    dna: {
-      freq: `${s.dna.peakFrequency.toFixed(0)}Hz`,
-      atk: `${s.dna.attackMs.toFixed(0)}ms`,
-      brightness: s.dna.brightness.toFixed(2)
-    }
+    dna: { freq: `${s.dna.peakFrequency.toFixed(0)}Hz`, atk: `${s.dna.attackMs.toFixed(0)}ms` }
   }));
 
   const pluginsContext = plugins.map(p => `${p.name} (${p.type})`).join(", ");
 
   const prompt = `
 Ты — Techno Architect OS AI. Помогаешь продюсеру в FL Studio.
-Твоя задача: проанализировать запрос и предложить лучшие звуки из списка ниже.
+ЗАПРОС: "${query}"
+ПЛАГИНЫ В ПРОЕКТЕ: ${pluginsContext}
+ДОСТУПНЫЕ СЕМПЛЫ: ${JSON.stringify(samplesContext)}
 
-ЗАПРОС ПОЛЬЗОВАТЕЛЯ: "${query}"
-ДОСТУПНЫЕ ПЛАГИНЫ: ${pluginsContext}
-КАНДИДАТЫ ИЗ БАЗЫ (ТОП-50):
-${JSON.stringify(samplesContext, null, 2)}
-
-ОТВЕТЬ КРАТКО (стиль терминала):
-1. Выбери 2-3 конкретных файла.
-2. Объясни ПОЧЕМУ (опираясь на их DNA: частоту, атаку).
-3. Дай совет по обработке (например: "Накинь на этот кик Distortion, у тебя есть FabFilter").
-Используй русский язык. Не используй Markdown-заголовки, только текст.
+ЗАДАЧА:
+1. Выбери из БАЗЫ только те семплы (ID), которые лучше всего подходят под запрос.
+2. Дай краткий технический комментарий (стиль терминала, русский язык).
+3. Верни строго JSON.
   `;
 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            text: { type: Type.STRING, description: "Технический комментарий" },
+            recommendedIds: { 
+              type: Type.ARRAY, 
+              items: { type: Type.STRING },
+              description: "Список ID из базы"
+            }
+          },
+          required: ["text", "recommendedIds"]
+        }
+      }
     });
-    return response.text || "Ошибка нейронной связи.";
+    
+    return JSON.parse(response.text.trim());
   } catch (err) {
-    console.error("AI Error:", err);
-    return "СИСТЕМА: КРИТИЧЕСКИЙ СБОЙ ГЕНЕРАЦИИ ОТВЕТА.";
+    console.error("AI Assistant Error:", err);
+    return { 
+      text: "СИСТЕМА: ОШИБКА НЕЙРОННОЙ СВЯЗИ. ВЫПОЛНЕН ЛОКАЛЬНЫЙ ПОИСК.", 
+      recommendedIds: relevantSamples.slice(0, 5).map(s => s.id) 
+    };
+  }
+};
+
+export const categorizePlugins = async (rawList: string): Promise<Omit<Plugin, 'id'>[]> => {
+  const prompt = `Категоризируй список музыкальных плагинов. Типы: Synth, EQ, Dynamics, Distortion, Reverb, Delay, Other.
+Список: ${rawList}
+Верни строго JSON массив объектов { "name": string, "type": string }.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              type: { type: Type.STRING }
+            },
+            required: ["name", "type"]
+          }
+        }
+      }
+    });
+    return JSON.parse(response.text.trim());
+  } catch (err) {
+    return rawList.split(/[\n,]/).filter(s => s.trim()).map(s => ({ name: s.trim(), type: 'Other' }));
   }
 };
