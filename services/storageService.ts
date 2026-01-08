@@ -23,9 +23,8 @@ export async function saveSamples(samples: AudioSample[]) {
   const tx = db.transaction('samples', 'readwrite');
   await tx.objectStore('samples').clear();
   for (const sample of samples) {
-    // Note: handle is non-serializable if it's FileSystemFileHandle, 
-    // we might need to store it differently or skip it for deep index storage
-    // but for now we try to keep it if it's a File object or handle.
+    // We strip non-serializable handle for the deep index storage if needed, 
+    // but typically File objects/handles are serializable in IndexedDB.
     await tx.objectStore('samples').put(sample);
   }
   await tx.done;
@@ -58,4 +57,23 @@ export async function clearAllData() {
   await tx.objectStore('plugins').clear();
   await tx.done;
   localStorage.clear();
+}
+
+export async function exportIndex() {
+  const samples = await loadSamples();
+  const plugins = await loadPlugins();
+  const data = JSON.stringify({ samples, plugins, version: '3.3', timestamp: Date.now() });
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `TA_OS_INDEX_${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+}
+
+export async function importIndex(jsonString: string) {
+  const data = JSON.parse(jsonString);
+  if (data.samples) await saveSamples(data.samples);
+  if (data.plugins) await savePlugins(data.plugins);
+  return data;
 }

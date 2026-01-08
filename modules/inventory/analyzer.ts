@@ -8,10 +8,10 @@ const findStartIdx = (data: Float32Array, threshold = 0.02): number => {
   return 0;
 };
 
-const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: number): number => {
-  const windowSize = 4096; // Увеличено для точности низких частот
-  const searchRangeMin = Math.floor(sampleRate / 400); // До 400Hz
-  const searchRangeMax = Math.floor(sampleRate / 30);  // От 30Hz
+const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: number, isKick: boolean): number => {
+  const windowSize = 8192; // Увеличено для сверхточного анализа низких частот
+  const searchRangeMin = Math.floor(sampleRate / 500); // До 500Hz
+  const searchRangeMax = Math.floor(sampleRate / 20);  // От 20Hz
 
   if (data.length - startIdx < windowSize + searchRangeMax) return 0;
   
@@ -19,34 +19,43 @@ const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: n
   let bestOffset = 0;
   let maxCorrelation = -Infinity;
 
-  // Автокорреляция с фокусом на суб-диапазон
+  // Если это кик, сначала ищем в диапазоне 30-100Hz с повышенным весом
+  const subRangeMin = Math.floor(sampleRate / 100);
+  const subRangeMax = Math.floor(sampleRate / 30);
+
   for (let offset = searchRangeMin; offset < searchRangeMax; offset++) {
     let correlation = 0;
     for (let i = 0; i < windowSize; i++) {
       correlation += segment[i] * data[startIdx + i + offset];
     }
+    
+    // Low-Frequency Biasing: Усиливаем корреляцию в суб-диапазоне для киков
+    if (isKick && offset >= subRangeMin && offset <= subRangeMax) {
+      correlation *= 1.5; 
+    }
+
     if (correlation > maxCorrelation) {
       maxCorrelation = correlation;
       bestOffset = offset;
     }
   }
 
-  return bestOffset > 0 ? sampleRate / bestOffset : 0;
+  const freq = bestOffset > 0 ? sampleRate / bestOffset : 0;
+  return freq < 20 ? 0 : freq; // Игнорируем шум ниже 20Hz
 };
 
-export const analyzeAudioBuffer = async (buffer: AudioBuffer): Promise<DNAProfile> => {
+export const analyzeAudioBuffer = async (buffer: AudioBuffer, sourceTags: string[]): Promise<DNAProfile> => {
   const data = buffer.getChannelData(0);
   const sampleRate = buffer.sampleRate;
+  const isKick = sourceTags.some(t => t.toUpperCase().includes('KICK'));
   
-  // 1. Тримминг тишины (Silence Trimming)
-  const startIdx = findStartIdx(data, 0.05); 
+  const startIdx = findStartIdx(data, 0.03); 
   const trimmedData = data.slice(startIdx);
   
-  if (trimmedData.length < 512) {
+  if (trimmedData.length < 512 || Math.max(...trimmedData.slice(0, 1000).map(Math.abs)) < 0.01) {
     return { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 };
   }
 
-  // 2. Точная Атака (Первые 150мс)
   const attackWindowSize = Math.floor(sampleRate * 0.15); 
   let maxAmp = 0;
   let peakIdx = 0;
@@ -56,7 +65,6 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer): Promise<DNAProfil
   }
   const attackMs = (peakIdx / sampleRate) * 1000;
 
-  // 3. Спад (Decay)
   let decayEndIdx = peakIdx;
   const decayThreshold = maxAmp * 0.05;
   for (let i = peakIdx; i < trimmedData.length; i++) {
@@ -67,10 +75,8 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer): Promise<DNAProfil
   }
   const decayMs = ((decayEndIdx - peakIdx) / sampleRate) * 1000;
 
-  // 4. Фундаментал (Sub-Bass Priority)
-  const peakFreq = estimateFundamental(data, startIdx, sampleRate);
+  const peakFreq = estimateFundamental(data, startIdx, sampleRate, isKick);
   
-  // 5. Текстура
   let crossings = 0;
   const analysisLimit = Math.min(trimmedData.length, sampleRate * 0.1);
   for (let i = 1; i < analysisLimit; i++) {
@@ -79,7 +85,7 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer): Promise<DNAProfil
 
   return {
     peakFrequency: peakFreq,
-    spectralCentroid: 0, // Placeholder
+    spectralCentroid: 0,
     attackMs: Math.max(0.1, attackMs),
     decayMs: Math.max(1, decayMs),
     zeroCrossingRate: crossings / analysisLimit,
@@ -87,14 +93,17 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer): Promise<DNAProfil
   };
 };
 
-export const getAcousticValidation = (dna: DNAProfile, existingTags: string[]): string[] => {
+export const getAcousticValidation = (dna: DNAProfile): string[] => {
   const tags: string[] = [];
   
-  // Tight vs Soft Logic
+  if (dna.peakFrequency === 0 || dna.decayMs < 5) {
+    tags.push('#Silent');
+    return tags;
+  }
+
   if (dna.attackMs < 15) tags.push('#Tight');
   else tags.push('#Soft');
 
-  // Sub Priority
   if (dna.peakFrequency > 30 && dna.peakFrequency < 65) tags.push('#Deep_Sub');
   if (dna.zeroCrossingRate > 0.4) tags.push('#Distorted');
 

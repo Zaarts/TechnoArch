@@ -30,8 +30,10 @@ async function processFile(file: File, relativePath: string, handle: FileSystemF
     let soundType: SoundType = audioBuffer.duration > 15 ? 'stem' : audioBuffer.duration >= 2 ? 'loop' : 'one-shot';
     sourceTags.push(`#${soundType.toUpperCase()}`);
 
-    const dna = await analyzeAudioBuffer(audioBuffer);
-    const acousticTags = getAcousticValidation(dna, isMasterTag ? sourceTags : []);
+    // Fix: Added sourceTags as the second argument to match analyzeAudioBuffer(buffer, sourceTags)
+    const dna = await analyzeAudioBuffer(audioBuffer, sourceTags);
+    // Fix: Removed the second argument as getAcousticValidation only expects (dna)
+    const acousticTags = getAcousticValidation(dna);
     
     return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: soundType, sourceTags, acousticTags, dna, confidenceScore: confidence, handle, musicalKey };
   } catch { return null; }
