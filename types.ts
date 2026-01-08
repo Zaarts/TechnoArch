@@ -8,17 +8,25 @@ export interface DNAProfile {
   brightness: number; // 0-1
 }
 
+export type SoundType = 'one-shot' | 'loop' | 'stem' | 'midi' | 'unknown';
+
 export interface AudioSample {
   id: string;
   name: string;
   path: string;
   fullPath: string;
-  type: 'one-shot' | 'loop' | 'unknown';
+  type: SoundType;
   sourceTags: string[];
   acousticTags: string[];
   dna: DNAProfile;
   confidenceScore: number;
-  handle: FileSystemFileHandle;
+  handle: FileSystemFileHandle | File;
+}
+
+export interface Plugin {
+  id: string;
+  name: string;
+  type: 'EQ' | 'Dynamics' | 'Distortion' | 'Reverb' | 'Delay' | 'Synth' | 'Other';
 }
 
 export interface ScanProgress {
@@ -26,14 +34,5 @@ export interface ScanProgress {
   processedFiles: number;
   currentFile: string;
   isScanning: boolean;
-}
-
-export enum SoundCategory {
-  KICK = 'Kick',
-  BASS = 'Bass',
-  HAT = 'Hat',
-  PERC = 'Percussion',
-  ATMOS = 'Atmos',
-  VOCAL = 'Vocal',
-  UNKNOWN = 'Unknown'
+  filteredCount: number;
 }
