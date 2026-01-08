@@ -18,20 +18,20 @@ async function processFile(file: File, relativePath: string, handle: FileSystemF
   if (!WHITELIST_EXTENSIONS.includes(ext) || isBlacklisted(relativePath)) return null;
 
   try {
-    const { tags: sourceTags, confidence: nameConfidence, musicalKey } = normalizeTags(relativePath, file.name);
+    const semantic = normalizeTags(relativePath, file.name);
 
     if (ext === '.MID' || ext === '.MIDI') {
-      return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: 'midi', sourceTags: ['#MIDI', ...sourceTags], acousticTags: [], dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 }, confidenceScore: 100, handle, musicalKey };
+      return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: 'midi', sourceTags: ['#MIDI', ...semantic.tags], acousticTags: [], dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 }, confidenceScore: 100, handle };
     }
 
     const arrayBuffer = await file.arrayBuffer();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     
     let soundType: SoundType = audioBuffer.duration > 15 ? 'stem' : audioBuffer.duration >= 2 ? 'loop' : 'one-shot';
-    sourceTags.push(`#${soundType.toUpperCase()}`);
+    const sourceTags = [...semantic.tags, `#${soundType.toUpperCase()}`];
 
-    const { dna, confidence: dnaConfidence } = await analyzeAudioBuffer(audioBuffer, sourceTags);
-    const acousticTags = getAcousticValidation(dna, sourceTags, dnaConfidence);
+    const { dna, confidence } = await analyzeAudioBuffer(audioBuffer, sourceTags, { isLocked: semantic.isLocked, masterCategory: semantic.masterCategory });
+    const acousticTags = getAcousticValidation(dna, semantic.masterCategory);
     
     return { 
       id: crypto.randomUUID(), 
@@ -42,9 +42,8 @@ async function processFile(file: File, relativePath: string, handle: FileSystemF
       sourceTags, 
       acousticTags, 
       dna, 
-      confidenceScore: dnaConfidence,
-      handle, 
-      musicalKey 
+      confidenceScore: confidence,
+      handle 
     };
   } catch { return null; }
 }
@@ -73,7 +72,7 @@ export async function scanFolder(
   await collect(dirHandle, dirHandle.name);
   const total = queue.length;
 
-  const BATCH_SIZE = 6;
+  const BATCH_SIZE = 8; // Увеличиваем батч для скорости
   for (let i = 0; i < queue.length; i += BATCH_SIZE) {
     const batch = queue.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(batch.map(async (item) => {

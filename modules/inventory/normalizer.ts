@@ -1,51 +1,41 @@
 
-import { BRAND_DICTIONARY, GENRE_NORMALIZER, CATEGORY_SYNONYMS } from '../../constants';
+import { CATEGORY_SYNONYMS, BRAND_DICTIONARY, GENRE_NORMALIZER } from '../../constants';
 
-// Регулярное выражение для поиска тональностей (C, A#m, Gmaj и т.д.)
-const KEY_REGEX = /\b([A-G][#b]?(?:min|maj|m|M)?)\b/i;
+const LOCKED_KEYWORDS = ['KICK', 'BD', 'BASS', 'BS', 'VOCAL', 'VOX', 'VOICE', 'SNRE', 'SNARE'];
 
 export const normalizeTags = (path: string, fileName: string): { 
   tags: string[], 
   confidence: number, 
-  isMasterTag: boolean,
+  isLocked: boolean,
+  masterCategory?: string,
   musicalKey?: string 
 } => {
   const fullPath = `${path}/${fileName}`.toUpperCase();
-  const parts = [...path.split(/[\/\\_-]/), ...fileName.split(/[\s\._-]/)];
   const tags = new Set<string>();
-  let confidence = 0;
-  let isMasterTag = false;
+  let isLocked = false;
+  let masterCategory: string | undefined;
 
-  // 1. Извлечение тональности
-  const keyMatch = fileName.match(KEY_REGEX);
-  const musicalKey = keyMatch ? keyMatch[1].toUpperCase() : undefined;
-
-  // 2. Приоритетная проверка КАТЕГОРИЙ (MASTER TAG)
+  // 1. Поиск "Абсолютной Истины" (Locked Keywords)
   for (const [key, value] of Object.entries(CATEGORY_SYNONYMS)) {
-    if (fullPath.includes(key.toUpperCase())) {
+    const k = key.toUpperCase();
+    if (fullPath.includes(k)) {
       tags.add(`#${value}`);
-      confidence = 100;
-      isMasterTag = true;
+      masterCategory = value;
+      if (LOCKED_KEYWORDS.includes(k)) isLocked = true;
     }
   }
 
-  // 3. Бренды и Жанры
-  parts.forEach(part => {
-    const p = part.toUpperCase();
-    if (BRAND_DICTIONARY[p]) {
-      tags.add(`#${BRAND_DICTIONARY[p].replace(/\s/g, '_')}`);
-      confidence = Math.max(confidence, 50);
-    }
-    if (GENRE_NORMALIZER[p]) {
-      tags.add(`#${GENRE_NORMALIZER[p].replace(/\s/g, '_')}`);
-      confidence = Math.max(confidence, 40);
-    }
+  // 2. Бренды и Жанры (Вспомогательные теги)
+  const parts = fullPath.split(/[\/\\_\-\s\.]/);
+  parts.forEach(p => {
+    if (BRAND_DICTIONARY[p]) tags.add(`#${BRAND_DICTIONARY[p].replace(/\s/g, '_')}`);
+    if (GENRE_NORMALIZER[p]) tags.add(`#${GENRE_NORMALIZER[p].replace(/\s/g, '_')}`);
   });
 
   return {
     tags: Array.from(tags),
-    confidence: Math.min(confidence, 100),
-    isMasterTag,
-    musicalKey
+    confidence: isLocked ? 60 : 20, // Базовый вес семантики
+    isLocked,
+    masterCategory
   };
 };
