@@ -21,6 +21,7 @@ export interface AudioSample {
   dna: DNAProfile;
   confidenceScore: number;
   handle: FileSystemFileHandle | File;
+  musicalKey?: string;
 }
 
 export interface Plugin {

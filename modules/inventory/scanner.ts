@@ -5,7 +5,7 @@ import { analyzeAudioBuffer, getAcousticValidation } from './analyzer';
 
 const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-const BLACKLIST_FOLDERS = ['/BACKUP/', '/SETTINGS/', '/ARTWORK/', '/SKINS/', '/TEMPLATES/', '/HELP/', '/DATA/', '/SYSTEM/', '/__MACOSX/', '/.GIT/'];
+const BLACKLIST_FOLDERS = ['/BACKUP/', '/SETTINGS/', '/DATA/', '/SYSTEM/', '/__MACOSX/', '/.GIT/'];
 const WHITELIST_EXTENSIONS = ['.WAV', '.MP3', '.FLAC', '.AIF', '.AIFF', '.OGG', '.MID', '.MIDI'];
 
 const isBlacklisted = (path: string): boolean => {
@@ -15,70 +15,100 @@ const isBlacklisted = (path: string): boolean => {
 
 async function processFile(file: File, relativePath: string, handle: FileSystemFileHandle | File): Promise<AudioSample | null> {
   const ext = file.name.substring(file.name.lastIndexOf('.')).toUpperCase();
-  if (!WHITELIST_EXTENSIONS.includes(ext) || isBlacklisted(relativePath) || file.size < 500) return null;
+  if (!WHITELIST_EXTENSIONS.includes(ext) || isBlacklisted(relativePath)) return null;
 
   try {
+    const { tags: sourceTags, confidence, isMasterTag, musicalKey } = normalizeTags(relativePath, file.name);
+
     if (ext === '.MID' || ext === '.MIDI') {
-      return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: 'midi', sourceTags: ['#MIDI'], acousticTags: [], dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 }, confidenceScore: 100, handle };
+      return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: 'midi', sourceTags: ['#MIDI', ...sourceTags], acousticTags: [], dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 }, confidenceScore: 100, handle, musicalKey };
     }
 
     const arrayBuffer = await file.arrayBuffer();
-    let audioBuffer: AudioBuffer;
-    try { audioBuffer = await audioCtx.decodeAudioData(arrayBuffer); } catch { return null; }
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     
     let soundType: SoundType = audioBuffer.duration > 15 ? 'stem' : audioBuffer.duration >= 2 ? 'loop' : 'one-shot';
-    const { tags: sourceTags, confidence, isMasterTag } = normalizeTags(relativePath, file.name);
     sourceTags.push(`#${soundType.toUpperCase()}`);
 
     const dna = await analyzeAudioBuffer(audioBuffer);
-    
-    // Если Master Tag найден по имени (например #Kick), анализатор добавляет только доп. теги (#Punchy)
     const acousticTags = getAcousticValidation(dna, isMasterTag ? sourceTags : []);
     
-    return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: soundType, sourceTags, acousticTags, dna, confidenceScore: confidence, handle };
+    return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: soundType, sourceTags, acousticTags, dna, confidenceScore: confidence, handle, musicalKey };
   } catch { return null; }
 }
 
-export async function scanFolder(dirHandle: FileSystemDirectoryHandle, onProgress: (p: ScanProgress) => void): Promise<AudioSample[]> {
-  const samples: AudioSample[] = [];
-  let totalProcessed = 0;
-  let filteredCount = 0;
+export async function scanFolder(
+  dirHandle: FileSystemDirectoryHandle, 
+  onProgress: (p: ScanProgress) => void,
+  onBatch: (samples: AudioSample[]) => void
+): Promise<AudioSample[]> {
+  const allSamples: AudioSample[] = [];
+  let processed = 0;
+  let filtered = 0;
 
-  async function recursiveScan(handle: FileSystemDirectoryHandle, currentPath: string) {
+  const queue: { handle: FileSystemFileHandle; path: string }[] = [];
+
+  // Phase 1: Rapid Filter & Indexing
+  async function collect(handle: FileSystemDirectoryHandle, currentPath: string) {
     for await (const entry of handle.values()) {
       if (entry.kind === 'directory') {
-        const path = `${currentPath}/${entry.name}`;
-        if (isBlacklisted(path)) { filteredCount++; continue; }
-        await recursiveScan(entry as FileSystemDirectoryHandle, path);
-      } else if (entry.kind === 'file') {
-        const fileEntry = entry as FileSystemFileHandle;
-        if (!WHITELIST_EXTENSIONS.includes(fileEntry.name.substring(fileEntry.name.lastIndexOf('.')).toUpperCase())) { filteredCount++; continue; }
-        totalProcessed++;
-        onProgress({ totalFiles: -1, processedFiles: totalProcessed, currentFile: fileEntry.name, isScanning: true, filteredCount });
-        const file = await fileEntry.getFile();
-        const sample = await processFile(file, currentPath, fileEntry);
-        if (sample) samples.push(sample); else filteredCount++;
+        const nextPath = `${currentPath}/${entry.name}`;
+        if (!isBlacklisted(nextPath)) await collect(entry as FileSystemDirectoryHandle, nextPath);
+      } else {
+        const ext = entry.name.substring(entry.name.lastIndexOf('.')).toUpperCase();
+        if (WHITELIST_EXTENSIONS.includes(ext)) {
+          queue.push({ handle: entry as FileSystemFileHandle, path: currentPath });
+        } else {
+          filtered++;
+        }
       }
     }
   }
-  await recursiveScan(dirHandle, dirHandle.name);
-  return samples;
+
+  await collect(dirHandle, dirHandle.name);
+  const total = queue.length;
+
+  // Phase 2: Parallel Analysis (Batch Size 6)
+  const BATCH_SIZE = 6;
+  for (let i = 0; i < queue.length; i += BATCH_SIZE) {
+    const batch = queue.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map(async (item) => {
+      const file = await item.handle.getFile();
+      const sample = await processFile(file, item.path, item.handle);
+      processed++;
+      onProgress({ totalFiles: total, processedFiles: processed, currentFile: item.handle.name, isScanning: true, filteredCount: filtered });
+      return sample;
+    }));
+
+    const validResults = results.filter((s): s is AudioSample => s !== null);
+    allSamples.push(...validResults);
+    onBatch(validResults); // Progressive update
+  }
+
+  return allSamples;
 }
 
-export async function scanFilesLegacy(files: FileList, onProgress: (p: ScanProgress) => void): Promise<AudioSample[]> {
-  const samples: AudioSample[] = [];
-  let filteredCount = 0;
-  const audioFiles = Array.from(files).filter(f => {
-    const isOk = WHITELIST_EXTENSIONS.includes(f.name.substring(f.name.lastIndexOf('.')).toUpperCase()) && !isBlacklisted(f.webkitRelativePath) && f.size > 500;
-    if (!isOk) filteredCount++;
-    return isOk;
-  });
-  for (let i = 0; i < audioFiles.length; i++) {
-    const file = audioFiles[i];
-    onProgress({ totalFiles: audioFiles.length, processedFiles: i + 1, currentFile: file.name, isScanning: true, filteredCount });
-    const parts = file.webkitRelativePath.split('/'); parts.pop();
-    const sample = await processFile(file, parts.join('/'), file);
-    if (sample) samples.push(sample); else filteredCount++;
+export async function scanFilesLegacy(
+  files: FileList, 
+  onProgress: (p: ScanProgress) => void,
+  onBatch: (samples: AudioSample[]) => void
+): Promise<AudioSample[]> {
+  const allSamples: AudioSample[] = [];
+  const queue = Array.from(files).filter(f => WHITELIST_EXTENSIONS.includes(f.name.substring(f.name.lastIndexOf('.')).toUpperCase()));
+  const total = queue.length;
+
+  for (let i = 0; i < queue.length; i += 6) {
+    const batch = queue.slice(i, i + 6);
+    const results = await Promise.all(batch.map(async (file, idx) => {
+      const parts = file.webkitRelativePath.split('/'); parts.pop();
+      const sample = await processFile(file, parts.join('/'), file);
+      onProgress({ totalFiles: total, processedFiles: i + idx + 1, currentFile: file.name, isScanning: true, filteredCount: 0 });
+      return sample;
+    }));
+
+    const validResults = results.filter((s): s is AudioSample => s !== null);
+    allSamples.push(...validResults);
+    onBatch(validResults);
   }
-  return samples;
+  return allSamples;
 }
