@@ -18,7 +18,7 @@ async function processFile(file: File, relativePath: string, handle: FileSystemF
   if (!WHITELIST_EXTENSIONS.includes(ext) || isBlacklisted(relativePath)) return null;
 
   try {
-    const { tags: sourceTags, confidence, isMasterTag, musicalKey } = normalizeTags(relativePath, file.name);
+    const { tags: sourceTags, confidence: nameConfidence, musicalKey } = normalizeTags(relativePath, file.name);
 
     if (ext === '.MID' || ext === '.MIDI') {
       return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: 'midi', sourceTags: ['#MIDI', ...sourceTags], acousticTags: [], dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 }, confidenceScore: 100, handle, musicalKey };
@@ -30,12 +30,22 @@ async function processFile(file: File, relativePath: string, handle: FileSystemF
     let soundType: SoundType = audioBuffer.duration > 15 ? 'stem' : audioBuffer.duration >= 2 ? 'loop' : 'one-shot';
     sourceTags.push(`#${soundType.toUpperCase()}`);
 
-    // Fix: Added sourceTags as the second argument to match analyzeAudioBuffer(buffer, sourceTags)
-    const dna = await analyzeAudioBuffer(audioBuffer, sourceTags);
-    // Fix: Removed the second argument as getAcousticValidation only expects (dna)
-    const acousticTags = getAcousticValidation(dna);
+    const { dna, confidence: dnaConfidence } = await analyzeAudioBuffer(audioBuffer, sourceTags);
+    const acousticTags = getAcousticValidation(dna, sourceTags, dnaConfidence);
     
-    return { id: crypto.randomUUID(), name: file.name, path: relativePath, fullPath: `${relativePath}/${file.name}`, type: soundType, sourceTags, acousticTags, dna, confidenceScore: confidence, handle, musicalKey };
+    return { 
+      id: crypto.randomUUID(), 
+      name: file.name, 
+      path: relativePath, 
+      fullPath: `${relativePath}/${file.name}`, 
+      type: soundType, 
+      sourceTags, 
+      acousticTags, 
+      dna, 
+      confidenceScore: dnaConfidence,
+      handle, 
+      musicalKey 
+    };
   } catch { return null; }
 }
 
@@ -46,11 +56,8 @@ export async function scanFolder(
 ): Promise<AudioSample[]> {
   const allSamples: AudioSample[] = [];
   let processed = 0;
-  let filtered = 0;
-
   const queue: { handle: FileSystemFileHandle; path: string }[] = [];
 
-  // Phase 1: Rapid Filter & Indexing
   async function collect(handle: FileSystemDirectoryHandle, currentPath: string) {
     for await (const entry of handle.values()) {
       if (entry.kind === 'directory') {
@@ -58,11 +65,7 @@ export async function scanFolder(
         if (!isBlacklisted(nextPath)) await collect(entry as FileSystemDirectoryHandle, nextPath);
       } else {
         const ext = entry.name.substring(entry.name.lastIndexOf('.')).toUpperCase();
-        if (WHITELIST_EXTENSIONS.includes(ext)) {
-          queue.push({ handle: entry as FileSystemFileHandle, path: currentPath });
-        } else {
-          filtered++;
-        }
+        if (WHITELIST_EXTENSIONS.includes(ext)) queue.push({ handle: entry as FileSystemFileHandle, path: currentPath });
       }
     }
   }
@@ -70,7 +73,6 @@ export async function scanFolder(
   await collect(dirHandle, dirHandle.name);
   const total = queue.length;
 
-  // Phase 2: Parallel Analysis (Batch Size 6)
   const BATCH_SIZE = 6;
   for (let i = 0; i < queue.length; i += BATCH_SIZE) {
     const batch = queue.slice(i, i + BATCH_SIZE);
@@ -78,15 +80,13 @@ export async function scanFolder(
       const file = await item.handle.getFile();
       const sample = await processFile(file, item.path, item.handle);
       processed++;
-      onProgress({ totalFiles: total, processedFiles: processed, currentFile: item.handle.name, isScanning: true, filteredCount: filtered });
+      onProgress({ totalFiles: total, processedFiles: processed, currentFile: item.handle.name, isScanning: true, filteredCount: 0 });
       return sample;
     }));
-
     const validResults = results.filter((s): s is AudioSample => s !== null);
     allSamples.push(...validResults);
-    onBatch(validResults); // Progressive update
+    onBatch(validResults);
   }
-
   return allSamples;
 }
 
@@ -98,7 +98,6 @@ export async function scanFilesLegacy(
   const allSamples: AudioSample[] = [];
   const queue = Array.from(files).filter(f => WHITELIST_EXTENSIONS.includes(f.name.substring(f.name.lastIndexOf('.')).toUpperCase()));
   const total = queue.length;
-
   for (let i = 0; i < queue.length; i += 6) {
     const batch = queue.slice(i, i + 6);
     const results = await Promise.all(batch.map(async (file, idx) => {
@@ -107,7 +106,6 @@ export async function scanFilesLegacy(
       onProgress({ totalFiles: total, processedFiles: i + idx + 1, currentFile: file.name, isScanning: true, filteredCount: 0 });
       return sample;
     }));
-
     const validResults = results.filter((s): s is AudioSample => s !== null);
     allSamples.push(...validResults);
     onBatch(validResults);

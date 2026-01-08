@@ -21,11 +21,21 @@ export async function getDB(): Promise<IDBPDatabase> {
 export async function saveSamples(samples: AudioSample[]) {
   const db = await getDB();
   const tx = db.transaction('samples', 'readwrite');
-  await tx.objectStore('samples').clear();
+  const store = tx.objectStore('samples');
+  await store.clear();
+  // Сохраняем порциями для стабильности
   for (const sample of samples) {
-    // We strip non-serializable handle for the deep index storage if needed, 
-    // but typically File objects/handles are serializable in IndexedDB.
-    await tx.objectStore('samples').put(sample);
+    await store.put(sample);
+  }
+  await tx.done;
+}
+
+export async function saveSamplesBatch(samples: AudioSample[]) {
+  const db = await getDB();
+  const tx = db.transaction('samples', 'readwrite');
+  const store = tx.objectStore('samples');
+  for (const sample of samples) {
+    await store.put(sample);
   }
   await tx.done;
 }
@@ -62,18 +72,36 @@ export async function clearAllData() {
 export async function exportIndex() {
   const samples = await loadSamples();
   const plugins = await loadPlugins();
-  const data = JSON.stringify({ samples, plugins, version: '3.3', timestamp: Date.now() });
+  const data = JSON.stringify({ 
+    samples, 
+    plugins, 
+    schema_version: '3.3.1', 
+    export_date: new Date().toISOString() 
+  });
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `TA_OS_INDEX_${new Date().toISOString().split('T')[0]}.json`;
+  a.download = `TECHNO_ARCHITECT_INDEX_${new Date().getTime()}.json`;
   a.click();
 }
 
 export async function importIndex(jsonString: string) {
-  const data = JSON.parse(jsonString);
-  if (data.samples) await saveSamples(data.samples);
-  if (data.plugins) await savePlugins(data.plugins);
-  return data;
+  try {
+    const data = JSON.parse(jsonString);
+    if (!data.samples || !Array.isArray(data.samples)) throw new Error("INVALID_SCHEMA: MISSING_SAMPLES");
+    
+    // Валидируем хотя бы первый объект
+    if (data.samples.length > 0) {
+      const test = data.samples[0];
+      if (!test.id || !test.dna) throw new Error("INVALID_SCHEMA: CORRUPTED_DNA_DATA");
+    }
+
+    await saveSamples(data.samples);
+    if (data.plugins) await savePlugins(data.plugins);
+    return data;
+  } catch (err) {
+    console.error("IMPORT_FAILED:", err);
+    throw err;
+  }
 }

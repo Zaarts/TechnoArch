@@ -1,75 +1,66 @@
 
 import { AudioSample } from '../../types';
 
-// Карта частот для техно (суб и первая октава)
-const NOTE_FREQ_MAP: Record<string, { min: number, max: number }> = {
-  'C': { min: 30, max: 35 },
-  'C#': { min: 33, max: 37 },
-  'D': { min: 35, max: 39 },
-  'D#': { min: 37, max: 41 },
-  'E': { min: 40, max: 43 },
-  'F': { min: 42, max: 45 },
-  'F#': { min: 44, max: 48 },
-  'G': { min: 47, max: 51 },
-  'G#': { min: 50, max: 54 },
-  'A': { min: 53, max: 57 },
-  'A#': { min: 56, max: 60 },
-  'B': { min: 59, max: 63 },
+const NOTE_FREQ_MAP: Record<string, number> = {
+  'C': 32.70, 'C#': 34.65, 'D': 36.71, 'D#': 38.89, 'E': 41.20, 'F': 43.65,
+  'F#': 46.25, 'G': 49.00, 'G#': 51.91, 'A': 55.00, 'A#': 58.27, 'B': 61.74
 };
 
 export const localSearch = (samples: AudioSample[] | null | undefined, query: string, limit = 50): AudioSample[] => {
   if (!samples || samples.length === 0) return [];
-  if (!query.trim()) return samples.filter(s => !s.acousticTags.includes('#Silent')).slice(0, limit);
   
-  const tokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+  const cleanQuery = query.toLowerCase().trim();
+  if (!cleanQuery) return samples.filter(s => !s.acousticTags.includes('#Silent')).slice(0, limit);
+  
+  const tokens = cleanQuery.split(/\s+/).filter(t => t.length > 0);
   const tagTokens = tokens.filter(t => t.startsWith('#'));
   const textTokens = tokens.filter(t => !t.startsWith('#'));
 
-  // Проверка на поиск ноты (напр. "note f" или "f note")
-  let targetFreqRange: { min: number, max: number } | null = null;
-  if (textTokens.includes('note')) {
-    const noteToken = textTokens.find(t => NOTE_FREQ_MAP[t.toUpperCase()]);
-    if (noteToken) {
-      targetFreqRange = NOTE_FREQ_MAP[noteToken.toUpperCase()];
-    }
-  }
-
   const scored = samples.map(s => {
     let score = 0;
-    const sampleName = s.name.toLowerCase();
-    const allTags = [...(s.sourceTags || []), ...(s.acousticTags || [])].map(t => t.toLowerCase());
+    const name = s.name.toLowerCase();
+    const tags = [...s.sourceTags, ...s.acousticTags].map(t => t.toLowerCase());
 
-    // Игнорируем тишину, если не запрашивали специально
-    if (s.acousticTags.includes('#Silent') && !query.includes('silent')) return { sample: s, score: -1 };
+    // Игнорируем тишину
+    if (s.acousticTags.includes('#Silent') && !cleanQuery.includes('silent')) return { sample: s, score: -1 };
 
-    // 1. Фильтр по тегам
+    // 1. Теги (Вес: 100)
     if (tagTokens.length > 0) {
-      const matchedAll = tagTokens.every(tt => allTags.some(at => at === tt || at.includes(tt)));
-      if (!matchedAll) return { sample: s, score: -1 };
-      score += 100;
+      const matchCount = tagTokens.filter(tt => tags.some(t => t === tt || t.includes(tt))).length;
+      if (matchCount === 0) return { sample: s, score: -1 };
+      score += matchCount * 100;
     }
 
-    // 2. Поиск по частоте ноты
-    if (targetFreqRange) {
-      const freq = s.dna.peakFrequency;
-      // Проверяем фундаментальную частоту (и октавы 2x, 4x)
-      if ((freq >= targetFreqRange.min && freq <= targetFreqRange.max) ||
-          (freq >= targetFreqRange.min * 2 && freq <= targetFreqRange.max * 2) ||
-          (s.musicalKey?.toUpperCase() === tokens.find(t => NOTE_FREQ_MAP[t.toUpperCase()])?.toUpperCase())) {
-        score += 200;
-      }
-    }
-
-    // 3. Поиск по тексту
+    // 2. Числовые ключевые слова (Вес: 150)
     textTokens.forEach(token => {
-      if (sampleName.includes(token)) score += 50;
-      if (allTags.some(at => at.includes(token))) score += 30;
+      // Частота
+      if (token === 'sub' && s.dna.peakFrequency < 65 && s.dna.peakFrequency > 20) score += 150;
+      if (token === 'high' && s.dna.peakFrequency > 200) score += 100;
       
-      if (token === 'fast' && s.dna.attackMs < 6) score += 40;
-      if (token === 'short' && s.dna.decayMs < 100) score += 40;
-      if (token === 'heavy' && s.dna.peakFrequency < 90) score += 40;
-      if (token === 'tight' && s.dna.attackMs < 15) score += 50;
+      // Динамика
+      if (token === 'short' && s.dna.attackMs < 12) score += 150;
+      if (token === 'tight' && s.dna.attackMs < 8) score += 200;
+      if (token === 'long' && s.dna.decayMs > 600) score += 150;
+      
+      // Текстура
+      if (token === 'crunch' && s.dna.zeroCrossingRate > 0.35) score += 150;
+      if (token === 'clean' && s.dna.zeroCrossingRate < 0.1) score += 100;
+
+      // Имя (Вес: 50)
+      if (name.includes(token)) score += 50;
     });
+
+    // 3. Поиск по Нотам (Вес: 300)
+    const noteToken = textTokens.find(t => NOTE_FREQ_MAP[t.toUpperCase()]);
+    if (noteToken) {
+      const targetHz = NOTE_FREQ_MAP[noteToken.toUpperCase()];
+      const freq = s.dna.peakFrequency;
+      const tolerance = 2.0;
+
+      // Проверяем 3 октавы
+      const match = [1, 2, 4].some(oct => Math.abs(freq - targetHz * oct) <= tolerance);
+      if (match) score += 300;
+    }
 
     return { sample: s, score };
   });

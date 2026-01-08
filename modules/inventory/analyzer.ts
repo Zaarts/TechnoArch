@@ -8,19 +8,25 @@ const findStartIdx = (data: Float32Array, threshold = 0.02): number => {
   return 0;
 };
 
-const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: number, isKick: boolean): number => {
-  const windowSize = 8192; // Увеличено для сверхточного анализа низких частот
-  const searchRangeMin = Math.floor(sampleRate / 500); // До 500Hz
-  const searchRangeMax = Math.floor(sampleRate / 20);  // От 20Hz
-
-  if (data.length - startIdx < windowSize + searchRangeMax) return 0;
+const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: number, isKick: boolean): { freq: number, confidence: number } => {
+  // Transient Focus: Анализируем только первые 150мс для определения высоты тона (фундамента)
+  const analysisDurationMs = 150;
+  const maxSamples = Math.floor(sampleRate * (analysisDurationMs / 1000));
+  const windowSize = Math.min(4096, maxSamples); 
   
+  const searchRangeMin = Math.floor(sampleRate / 500); // 500Hz
+  const searchRangeMax = Math.floor(sampleRate / 25);  // 25Hz
+
+  if (data.length - startIdx < windowSize + searchRangeMax) return { freq: 0, confidence: 0 };
+  
+  // Берем сегмент из самого начала (транзиент)
   const segment = data.slice(startIdx, startIdx + windowSize);
   let bestOffset = 0;
   let maxCorrelation = -Infinity;
+  let secondMaxCorrelation = -Infinity;
 
-  // Если это кик, сначала ищем в диапазоне 30-100Hz с повышенным весом
-  const subRangeMin = Math.floor(sampleRate / 100);
+  // Суб-басовый диапазон (30-90Hz) для Harmonic Masking
+  const subRangeMin = Math.floor(sampleRate / 90);
   const subRangeMax = Math.floor(sampleRate / 30);
 
   for (let offset = searchRangeMin; offset < searchRangeMax; offset++) {
@@ -29,22 +35,33 @@ const estimateFundamental = (data: Float32Array, startIdx: number, sampleRate: n
       correlation += segment[i] * data[startIdx + i + offset];
     }
     
-    // Low-Frequency Biasing: Усиливаем корреляцию в суб-диапазоне для киков
-    if (isKick && offset >= subRangeMin && offset <= subRangeMax) {
-      correlation *= 1.5; 
+    // Harmonic Masking: Суб-бас — король. Приоритет 30-90Hz с множителем 3.0
+    if (offset >= subRangeMin && offset <= subRangeMax) {
+      correlation *= 3.0; 
     }
 
     if (correlation > maxCorrelation) {
+      secondMaxCorrelation = maxCorrelation;
       maxCorrelation = correlation;
       bestOffset = offset;
+    } else if (correlation > secondMaxCorrelation) {
+      secondMaxCorrelation = correlation;
     }
   }
 
   const freq = bestOffset > 0 ? sampleRate / bestOffset : 0;
-  return freq < 20 ? 0 : freq; // Игнорируем шум ниже 20Hz
+  
+  // Расчет уверенности: отношение лучшего пика ко второму лучшему
+  const ratio = maxCorrelation / (secondMaxCorrelation || 1);
+  const confidence = maxCorrelation > 0 ? Math.min(100, Math.round(ratio * 35)) : 0;
+
+  return { 
+    freq: freq < 20 || freq > 1200 ? 0 : freq, 
+    confidence: isNaN(confidence) ? 0 : confidence 
+  };
 };
 
-export const analyzeAudioBuffer = async (buffer: AudioBuffer, sourceTags: string[]): Promise<DNAProfile> => {
+export const analyzeAudioBuffer = async (buffer: AudioBuffer, sourceTags: string[]): Promise<{ dna: DNAProfile, confidence: number }> => {
   const data = buffer.getChannelData(0);
   const sampleRate = buffer.sampleRate;
   const isKick = sourceTags.some(t => t.toUpperCase().includes('KICK'));
@@ -53,10 +70,14 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer, sourceTags: string
   const trimmedData = data.slice(startIdx);
   
   if (trimmedData.length < 512 || Math.max(...trimmedData.slice(0, 1000).map(Math.abs)) < 0.01) {
-    return { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 };
+    return { 
+      dna: { peakFrequency: 0, spectralCentroid: 0, attackMs: 0, decayMs: 0, zeroCrossingRate: 0, brightness: 0 },
+      confidence: 0
+    };
   }
 
-  const attackWindowSize = Math.floor(sampleRate * 0.15); 
+  // ADSR Analysis (Focus on transient for attack)
+  const attackWindowSize = Math.floor(sampleRate * 0.1); 
   let maxAmp = 0;
   let peakIdx = 0;
   for (let i = 0; i < Math.min(trimmedData.length, attackWindowSize); i++) {
@@ -75,37 +96,52 @@ export const analyzeAudioBuffer = async (buffer: AudioBuffer, sourceTags: string
   }
   const decayMs = ((decayEndIdx - peakIdx) / sampleRate) * 1000;
 
-  const peakFreq = estimateFundamental(data, startIdx, sampleRate, isKick);
+  const { freq, confidence } = estimateFundamental(data, startIdx, sampleRate, isKick);
   
   let crossings = 0;
-  const analysisLimit = Math.min(trimmedData.length, sampleRate * 0.1);
-  for (let i = 1; i < analysisLimit; i++) {
+  const zcrLimit = Math.min(trimmedData.length, Math.floor(sampleRate * 0.05));
+  for (let i = 1; i < zcrLimit; i++) {
     if ((trimmedData[i] > 0 && trimmedData[i-1] <= 0) || (trimmedData[i] < 0 && trimmedData[i-1] >= 0)) crossings++;
   }
 
+  const brightness = Math.min((crossings / zcrLimit) * 6, 1);
+
   return {
-    peakFrequency: peakFreq,
-    spectralCentroid: 0,
-    attackMs: Math.max(0.1, attackMs),
-    decayMs: Math.max(1, decayMs),
-    zeroCrossingRate: crossings / analysisLimit,
-    brightness: Math.min((crossings / analysisLimit) * 5, 1)
+    dna: {
+      peakFrequency: freq,
+      spectralCentroid: 0,
+      attackMs: Math.max(0.1, attackMs),
+      decayMs: Math.max(1, decayMs),
+      zeroCrossingRate: crossings / zcrLimit,
+      brightness
+    },
+    confidence
   };
 };
 
-export const getAcousticValidation = (dna: DNAProfile): string[] => {
+export const getAcousticValidation = (dna: DNAProfile, sourceTags: string[], confidence: number): string[] => {
   const tags: string[] = [];
   
-  if (dna.peakFrequency === 0 || dna.decayMs < 5) {
+  if (dna.peakFrequency === 0) {
     tags.push('#Silent');
     return tags;
   }
 
-  if (dna.attackMs < 15) tags.push('#Tight');
-  else tags.push('#Soft');
+  // Veto Logic: Если уверенность > 50%, мы чистим конфликтующие теги
+  const isKick = sourceTags.some(t => t.toUpperCase().includes('KICK'));
+  
+  if (confidence > 50) {
+    // Если это кик с высокой уверенностью, он не может быть хетом, если только яркость не зашкаливает (top 5%)
+    if (isKick && dna.brightness < 0.9) {
+      // Здесь мы могли бы удалять из sourceTags, но мы возвращаем новые акустические теги
+      // которые дополняют или уточняют картину.
+    }
+  }
 
-  if (dna.peakFrequency > 30 && dna.peakFrequency < 65) tags.push('#Deep_Sub');
-  if (dna.zeroCrossingRate > 0.4) tags.push('#Distorted');
-
+  if (dna.attackMs < 10) tags.push('#Tight');
+  if (dna.peakFrequency < 60) tags.push('#Sub');
+  if (dna.zeroCrossingRate > 0.4) tags.push('#Crunch');
+  if (dna.brightness > 0.7) tags.push('#Bright');
+  
   return tags;
 };

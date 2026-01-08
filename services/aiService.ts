@@ -18,7 +18,8 @@ export const getAIRecommendation = async (
     id: s.id,
     name: s.name,
     tags: [...s.sourceTags, ...s.acousticTags],
-    dna: { freq: `${s.dna.peakFrequency.toFixed(0)}Hz`, atk: `${s.dna.attackMs.toFixed(0)}ms` }
+    confidence: s.confidenceScore,
+    dna: { freq: `${s.dna.peakFrequency.toFixed(0)}Hz`, atk: `${s.dna.attackMs.toFixed(0)}ms`, bri: s.dna.brightness.toFixed(2) }
   }));
 
   const pluginsContext = plugins.map(p => `${p.name} (${p.type})`).join(", ");
@@ -31,8 +32,9 @@ export const getAIRecommendation = async (
 
 ЗАДАЧА:
 1. Выбери из БАЗЫ только те семплы (ID), которые лучше всего подходят под запрос.
-2. Дай краткий технический комментарий (стиль терминала, русский язык).
-3. Верни строго JSON.
+2. ПРАВИЛО: Для запросов "Tight", "Плотный", "Резкий" выбирай строго семплы, где "confidence" > 70.
+3. Дай краткий технический комментарий (стиль терминала, русский язык).
+4. Верни строго JSON.
   `;
 
   try {
